@@ -1,0 +1,38 @@
+# PDF to MD 工作流配置文件
+# 复制此文件为 config.yaml 并填入你的 API keys
+
+# MinerU API (PDF 提取)
+mineru:
+  api_key: "${MINERU_API_KEY}"  # 从环境变量读取
+  base_url: "https://mineru.net"
+
+# LLM Provider 配置
+# 支持: anthropic, openai, minimax, nvidia
+default_provider: "anthropic"
+
+# Anthropic Claude
+anthropic:
+  api_key: "${ANTHROPIC_API_KEY}"
+  model: "claude-opus-4-6"
+
+# OpenAI GPT
+openai:
+  api_key: "${OPENAI_API_KEY}"
+  model: "gpt-4o"
+
+# MiniMax
+minimax:
+  api_key: "${MINIMAX_API_KEY}"
+  base_url: "https://api.minimaxi.com/v1"
+  model: "MiniMax-M2.7"
+
+# NVIDIA DeepSeek (备用)
+nvidia:
+  api_key: "${NVIDIA_API_KEY}"
+  base_url: "https://integrate.api.nvidia.com/v1"
+  model: "deepseek-ai/deepseek-v3.2"
+
+# 图床配置
+image_host:
+  token: "${IMAGE_HOST_TOKEN}"
+  url: "https://imgbed.361026.xyz/upload"

@@ -6,7 +6,9 @@
 
 - **PDF 提取** - 使用 Mineru API 将 PDF 转为 Markdown
 - **LLM 优化** - 使用大模型智能优化排版（支持多 Provider）
-- **图床上传** - 可选上传图片到图床并替换链接
+- **智能图片处理**
+  - 表格图片 → 用 LLM 转换为 Markdown 表格
+  - 普通图片 → 上传到图床，替换链接，删除本地文件
 - **多平台兼容** - Claude Code、Hermes Agent、OpenClaw、CrewAI、AutoGen、LangChain
 
 ## 支持的 LLM Provider
@@ -80,9 +82,34 @@ python scripts/pdf_md_workflow.py --optimize document.md
 # 批量处理
 python scripts/pdf_md_workflow.py --batch "*.pdf"
 
-# 跳过图床上传
+# 跳过图片处理
 python scripts/pdf_md_workflow.py --pdf doc.pdf --no-image
 ```
+
+## 图片处理流程
+
+PDF 提取的图片分为两类处理：
+
+### 1. 表格图片
+- 用 LLM 视觉能力识别图片中的表格数据
+- 转换为 Markdown 表格格式
+- 直接替换 MD 中的图片引用
+
+### 2. 普通图片
+- 上传到图床（`imgbed.361026.xyz`）
+- 获取图床链接
+- 替换 MD 中的图片引用为图床链接
+- **删除本地图片文件**
+
+### 判断逻辑
+
+```python
+# LLM 判断图片类型
+if 图片是表格 → 调用 LLM 转换为 Markdown 表格
+else → 上传到图床，替换链接，删除本地文件
+```
+
+> 注意：图片处理需要配置图床 Token 和 LLM Client。
 
 ## Hermes Agent / OpenClaw 配置
 

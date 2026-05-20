@@ -430,19 +430,40 @@ class MineruExtractor:
                 pass
 
 
-# ============== 图床上传 ==============
+# ============== 图片处理 ==============
 
-class ImageHostUploader:
-    """图床上传器"""
+class ImageHandler:
+    """图片处理器：区分表格图片和普通图片，分别处理"""
 
-    def __init__(self, token: str, url: str = "https://imgbed.361026.xyz/upload"):
-        self.token = token
-        self.url = url
+    def __init__(self, image_host_token: str, image_host_url: str = "https://imgbed.361026.xyz/upload",
+                 llm_client=None, llm_model: str = "MiniMax-M2.7", llm_provider_type: str = "minimax"):
+        """
+        Args:
+            image_host_token: 图床 Token
+            image_host_url: 图床上传地址
+            llm_client: LLM Client（用于判断表格图片）
+            llm_model: 模型名称
+            llm_provider_type: Provider 类型
+        """
+        self.image_host_token = image_host_token
+        self.image_host_url = image_host_url
+        self.llm_client = llm_client
+        self.llm_model = llm_model
+        self.llm_provider_type = llm_provider_type
 
-    def upload(self, md_path: str) -> str:
-        """上传 MD 中的图片并替换链接"""
-        import requests
+    def process_md_images(self, md_path: str, images_dir: str) -> str:
+        """处理 MD 中的图片
+
+        Args:
+            md_path: MD 文件路径
+            images_dir: 图片目录路径
+
+        Returns:
+            处理后的 MD 内容
+        """
+        import base64
         import re
+        import requests
 
         with open(md_path, "r", encoding="utf-8") as f:
             content = f.read()
@@ -454,28 +475,178 @@ class ImageHostUploader:
         for alt_text, image_path in matches:
             image_path = image_path.strip()
             if image_path.startswith(("http://", "https://")):
+                continue  # 已是网络图片，跳过
+
+            full_image_path = Path(images_dir) / image_path if not Path(image_path).is_absolute() else Path(image_path)
+
+            if not full_image_path.exists():
                 continue
 
-            # 上传本地图片
-            if Path(image_path).exists():
-                try:
-                    with open(image_path, "rb") as f:
-                        files = {"file": f}
-                        data = {"token": self.token}
-                        response = requests.post(self.url, files=files, data=data, timeout=30)
-                        result = response.json()
+            try:
+                # 判断图片类型
+                is_table = self._is_table_image(full_image_path)
 
-                        if result.get("code") == 0:
-                            remote_url = result.get("data", {}).get("url", "")
-                            content = content.replace(image_path, remote_url)
-                except Exception:
-                    pass
+                if is_table:
+                    # 表格图片：用 LLM 转换为 Markdown 表格
+                    table_md = self._convert_table_to_markdown(full_image_path)
+                    if table_md:
+                        # 替换图片为表格
+                        content = content.replace(f'![{alt_text}]({image_path})', table_md)
+                        print(f"  [表格] {image_path} → 转换为 Markdown 表格")
+                else:
+                    # 普通图片：上传到图床
+                    remote_url = self._upload_to_image_host(full_image_path)
+                    if remote_url:
+                        # 替换为图床链接
+                        content = content.replace(f'![{alt_text}]({image_path})', f'![{alt_text}]({remote_url})')
+                        print(f"  [图片] {image_path} → {remote_url}")
+
+                # 删除本地图片
+                if full_image_path.exists():
+                    full_image_path.unlink()
+                    print(f"  [清理] 删除本地图片 {full_image_path.name}")
+
+            except Exception as e:
+                print(f"  [错误] 处理图片 {image_path} 失败: {e}")
 
         # 保存修改后的 MD
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(content)
 
-        return md_path
+        return content
+
+    def _is_table_image(self, image_path: Path) -> bool:
+        """判断图片是否为表格图片"""
+        if not self.llm_client:
+            # 没有 LLM client，假设不是表格
+            return False
+
+        import base64
+        import requests
+
+        try:
+            # 读取图片并转为 base64
+            with open(image_path, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+
+            # 构建判断 prompt
+            prompt = f"""请判断这张图片是否为表格图片（包含行列数据的表格）。
+
+判断标准：
+- 如果是表格图片（有行列结构的数据表格），返回 "TABLE"
+- 如果是普通图片（照片、示意图、流程图、示意图、地图等），返回 "IMAGE"
+
+只返回 TABLE 或 IMAGE，不要其他内容。"""
+
+            # 发送图片给 LLM 判断
+            if self.llm_provider_type == "anthropic":
+                message = self.llm_client.messages.create(
+                    model=self.llm_model,
+                    max_tokens=10,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_data}}
+                        ]
+                    }]
+                )
+                result = message.content[0].text.strip().upper()
+            else:
+                # OpenAI/MiniMax 兼容接口
+                response = self.llm_client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}}
+                        ]
+                    }],
+                    max_tokens=10
+                )
+                result = response.choices[0].message.content.strip().upper()
+
+            return "TABLE" in result
+
+        except Exception as e:
+            print(f"  [警告] 判断图片类型失败: {e}")
+            return False
+
+    def _convert_table_to_markdown(self, image_path: Path) -> str:
+        """将表格图片转换为 Markdown 表格"""
+        import base64
+        import requests
+
+        try:
+            # 读取图片并转为 base64
+            with open(image_path, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+
+            prompt = """请仔细识别这张表格图片中的所有数据，并将其转换为 Markdown 表格格式。
+
+要求：
+1. 保持原始数据的准确性
+2. 表头单独一行
+3. 使用标准的 Markdown 表格语法（| 列1 | 列2 |）
+4. 不要添加任何解释说明，只返回 Markdown 表格
+
+如果图片中不是有效表格，返回"[非表格图片]"。"""
+
+            if self.llm_provider_type == "anthropic":
+                message = self.llm_client.messages.create(
+                    model=self.llm_model,
+                    max_tokens=2000,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_data}}
+                        ]
+                    }]
+                )
+                table_md = message.content[0].text.strip()
+            else:
+                response = self.llm_client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_data}"}}
+                        ]
+                    }],
+                    max_tokens=2000
+                )
+                table_md = response.choices[0].message.content.strip()
+
+            # 如果返回表示不是表格，返回空
+            if "[非表格图片]" in table_md:
+                return ""
+
+            return table_md
+
+        except Exception as e:
+            print(f"  [错误] 转换表格失败: {e}")
+            return ""
+
+    def _upload_to_image_host(self, image_path: Path) -> str:
+        """上传图片到图床"""
+        import requests
+
+        try:
+            with open(image_path, "rb") as f:
+                files = {"file": f}
+                data = {"token": self.image_host_token}
+                response = requests.post(self.image_host_url, files=files, data=data, timeout=30)
+                result = response.json()
+
+                if result.get("code") == 0:
+                    return result.get("data", {}).get("url", "")
+        except Exception as e:
+            print(f"  [错误] 上传图片失败: {e}")
+
+        return ""
 
 
 # ============== 主工作流 ==============
@@ -504,16 +675,25 @@ class PDFMDWorkflow:
         mineru_url = self.config.get("mineru", {}).get("base_url", "https://mineru.net")
         self.mineru = MineruExtractor(mineru_key, mineru_url) if mineru_key else None
 
-        # 初始化图床上传
-        image_host = self.config.get("image_host", {})
-        image_token = image_host.get("token", "")
-        image_url = image_host.get("url", "")
-        self.uploader = ImageHostUploader(image_token, image_url) if image_token else None
-
         # 外部 LLM Client（优先使用）
         self.external_llm_client = llm_client
         self.external_llm_model = llm_model or self.config.get("default_model", "MiniMax-M2.7")
         self.external_llm_provider_type = llm_provider_type
+
+        # 初始化图片处理器
+        image_host = self.config.get("image_host", {})
+        image_token = image_host.get("token", "")
+        image_url = image_host.get("url", "")
+        if image_token:
+            self.image_handler = ImageHandler(
+                image_host_token=image_token,
+                image_host_url=image_url,
+                llm_client=self.external_llm_client,
+                llm_model=self.external_llm_model,
+                llm_provider_type=self.external_llm_provider_type
+            )
+        else:
+            self.image_handler = None
 
         # 默认 Provider（当没有外部 client 时使用）
         self.default_provider = self.config.get("default_provider", "minimax")
@@ -595,11 +775,16 @@ class PDFMDWorkflow:
         result["optimized_path"] = str(optimized_path)
         print(f"[3/3] 优化完成: {optimized_path.name}")
 
-        # 3. 图床上传
-        if upload_image and self.uploader:
-            print("上传图片到图床...")
-            self.uploader.upload(str(optimized_path))
-            result["uploaded"] = True
+        # 3. 图片处理（表格图片转MD + 普通图片上传图床）
+        if upload_image and self.image_handler:
+            print("处理图片...")
+            images_dir = md_path.parent / "images"
+            self.image_handler.process_md_images(str(optimized_path), str(images_dir))
+            result["images_processed"] = True
+
+            # 清理空的 images 目录
+            if images_dir.exists() and not any(images_dir.iterdir()):
+                images_dir.rmdir()
 
         return result
 
